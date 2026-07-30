@@ -1,8 +1,21 @@
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const sessionService = require('./sessionService');
+const { execSync } = require('child_process');
 
 puppeteer.use(StealthPlugin());
+
+function findChrome() {
+  const envPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (envPath) return envPath;
+  try {
+    return execSync('which chromium || which chromium-browser || which google-chrome || which google-chrome-stable', { encoding: 'utf-8' }).trim();
+  } catch {
+    return null;
+  }
+}
+
+const CHROME_PATH = findChrome();
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -56,7 +69,8 @@ class ScraperService {
     const executablePath =
       options.executablePath ||
       process.env.CHROME_EXECUTABLE_PATH ||
-      process.env.PUPPETEER_EXECUTABLE_PATH;
+      process.env.PUPPETEER_EXECUTABLE_PATH ||
+      CHROME_PATH;
 
     if (executablePath) {
       launchOptions.executablePath = executablePath;
