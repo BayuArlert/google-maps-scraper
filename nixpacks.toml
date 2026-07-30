@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["chromium", "nodejs", "nss", "alsa-lib", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "glib", "gtk3", "dbus", "libsecret"]
+nixPkgs = ["chromium", "nodejs"]
 
 [phases.build]
-cmds = ["npm install", "npm run build", "cd backend && npm install", "cd backend && npx puppeteer browsers install chrome"]
+cmds = ["npm install", "npm run build", "cd backend && npm install"]
 
 [start]
-cmd = "cd backend && node src/server.js"
+cmd = "cd backend && PUPPETEER_EXECUTABLE_PATH=$(which chromium) node src/server.js"
