@@ -8,8 +8,15 @@ puppeteer.use(StealthPlugin());
 function findChrome() {
   const envPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
   if (envPath) return envPath;
+
+  const isWindows = process.platform === 'win32';
+  const command = isWindows
+    ? 'where chromium 2>nul || where chrome 2>nul || where google-chrome 2>nul'
+    : 'which chromium || which chromium-browser || which google-chrome || which google-chrome-stable';
+
   try {
-    return execSync('which chromium || which chromium-browser || which google-chrome || which google-chrome-stable', { encoding: 'utf-8' }).trim();
+    const result = execSync(command, { encoding: 'utf-8' }).trim();
+    return result.split(/\r?\n/)[0] || null;
   } catch {
     return null;
   }
@@ -20,13 +27,99 @@ const CHROME_PATH = findChrome();
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 function countResultCardsInBrowser() {
+  return getFeedListItemsInBrowser().length;
+}
+
+function getFeedListItemsInBrowser() {
   const feed = document.querySelector('div[role="feed"]');
-  if (!feed) return 0;
+  if (!feed) return [];
 
-  const cardCount = feed.querySelectorAll('a.hfpxzc, .Nv2PK, div[role="article"]').length;
-  if (cardCount > 0) return cardCount;
+  const cardSelectors = ['a.hfpxzc', '.Nv2PK', 'div[role="article"]'];
+  let items = [];
+  for (const selector of cardSelectors) {
+    const found = Array.from(feed.querySelectorAll(selector));
+    if (found.length > items.length) {
+      items = found;
+    }
+  }
 
-  return feed.querySelectorAll('div[jsaction]').length;
+  if (items.length === 0) {
+    items = Array.from(feed.querySelectorAll('div[jsaction]')).filter(div => div.querySelector('a.hfpxzc'));
+  }
+
+  if (items.length === 0) {
+    items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
+  }
+
+  return items;
+}
+
+function getBusinessNameFromListItem(item) {
+  if (!item) return '';
+
+  const link = item.matches('a.hfpxzc') ? item : item.querySelector('a.hfpxzc');
+  if (link) {
+    const name = (link.getAttribute('aria-label') || link.innerText || link.textContent || '').trim();
+    if (name) return name;
+  }
+
+  const nameElement = item.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd, div[aria-label]');
+  return nameElement
+    ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
+    : '';
+}
+
+function extractPhoneFromTextInBrowser(text) {
+  if (!text || !text.trim()) return null;
+
+  const normalized = text.trim();
+
+  const usPattern = normalized.match(/(?:\+1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/);
+  if (usPattern) {
+    return `${usPattern[1]}${usPattern[2]}${usPattern[3]}`;
+  }
+
+  const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
+  if (hpPattern08) {
+    const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+    if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+  }
+
+  const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
+  if (hpPattern08Long) return hpPattern08Long[1];
+
+  const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+  if (hpPattern62) {
+    let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+    if (cleaned.startsWith('+62')) cleaned = `0${cleaned.substring(3)}`;
+    else if (cleaned.startsWith('62')) cleaned = `0${cleaned.substring(2)}`;
+    if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+  }
+
+  const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+  if (landlinePattern) {
+    const cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
+    if (cleaned.length >= 9 && cleaned.length <= 12) return cleaned;
+  }
+
+  const genericPattern = normalized.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
+  if (genericPattern) {
+    const cleaned = genericPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+    if (cleaned.length >= 10 && cleaned.length <= 15) return cleaned;
+  }
+
+  const telLink = normalized.match(/tel:(\+?\d+)/i);
+  if (telLink && telLink[1]) {
+    const digits = telLink[1].replace(/\D/g, '');
+    if (digits.length >= 10 && digits.length <= 15) return telLink[1];
+  }
+
+  let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').replace(/[()]/g, '');
+  if (cleaned.startsWith('+1') && cleaned.length >= 12) cleaned = cleaned.substring(2);
+  if (cleaned.startsWith('+62') && cleaned.length >= 12) cleaned = `0${cleaned.substring(3)}`;
+  if (cleaned.length >= 10 && cleaned.length <= 15 && /^\d+$/.test(cleaned)) return cleaned;
+
+  return null;
 }
 
 function extractBusinessesInBrowser(keywordLabel) {
@@ -296,6 +389,34 @@ class ScraperService {
     }
   }
 
+  async navigateToMapsPage(page, url, options = {}) {
+    const {
+      timeout = 45000,
+      waitForFeed = false,
+      waitForDetail = false,
+    } = options;
+
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout,
+    });
+
+    await this.dismissGoogleConsent(page);
+
+    const feedSelector = 'div[role="feed"]';
+    const detailSelector = 'h1.DUwDvf, button.CsEnBe[data-item-id^="phone:tel:"], a[href^="tel:"], div.Io6YTe';
+
+    if (waitForFeed) {
+      await page.waitForSelector(feedSelector, { timeout: 15000 }).catch(() => {});
+    } else if (waitForDetail) {
+      await page.waitForSelector(detailSelector, { timeout: 15000 }).catch(() => {});
+    } else {
+      await page.waitForSelector(`${feedSelector}, ${detailSelector}`, { timeout: 15000 }).catch(() => {});
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+
   async scrapeGoogleMaps(keyword, location = '', maxResults = 0, options = {}) {
     let browser;
     
@@ -320,18 +441,10 @@ class ScraperService {
       console.log(`📍 Opening: ${url}`);
       
       // Navigate ke Google Maps
-      await page.goto(url, { 
-        waitUntil: 'networkidle2',
-        timeout: 60000 
-      });
+      await this.navigateToMapsPage(page, url, { waitForFeed: true });
 
-      await this.dismissGoogleConsent(page);
-
-      // Wait for results to load
-      await page.waitForSelector('div[role="feed"]', { timeout: 10000 });
-      
       // Tunggu sebentar untuk load data
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await new Promise(resolve => setTimeout(resolve, 1500));
 
       // Scroll untuk load lebih banyak results
       await this.scrollResults(page, maxResults);
@@ -506,15 +619,39 @@ class ScraperService {
     const businessName = business.name || '';
     const detailUrl = business.detailUrl || '';
 
+    const canUseListPanel = await page.evaluate(() => !!document.querySelector('div[role="feed"]'));
+
+    if (canUseListPanel) {
+      try {
+        const listResult = await this.getPhoneNumberFromList(page, businessName, index);
+        const phone = typeof listResult === 'object' ? listResult.phone : listResult;
+        const website = typeof listResult === 'object' ? listResult.website : 'Tidak';
+
+        if (phone && String(phone).replace(/\D/g, '').length >= 8) {
+          return { phone, website: website || 'Tidak' };
+        }
+
+        if (website && website !== 'Tidak') {
+          if (detailUrl) {
+            const detailResult = await this.getPhoneNumberFromDetailUrl(browser, detailUrl, businessName);
+            if (detailResult?.phone && String(detailResult.phone).replace(/\D/g, '').length >= 8) {
+              return { phone: detailResult.phone, website };
+            }
+          }
+          return { phone: phone || null, website };
+        }
+      } catch (error) {
+        console.warn(`⚠️ Gagal ambil nomor lewat list panel (${businessName}): ${error.message}`);
+      }
+    }
+
     if (detailUrl) {
       try {
         const result = await this.getPhoneNumberFromDetailUrl(browser, detailUrl, businessName);
-        if (result && result.phone && result.phone.length >= 8) {
+        if (result && result.phone && String(result.phone).replace(/\D/g, '').length >= 8) {
           return result;
         }
-        // Phone not found via detailUrl, but website might still have been found
         if (result && result.website && result.website !== 'Tidak') {
-          // Try list for phone but keep website
           const listPhone = await this.getPhoneNumberFromList(page, businessName, index);
           const listResult = typeof listPhone === 'object' ? listPhone : { phone: listPhone, website: 'Tidak' };
           return { phone: listResult.phone, website: result.website };
@@ -623,20 +760,11 @@ class ScraperService {
         : `https://www.google.com${detailUrl}`;
 
       detailPage = await browser.newPage();
-      await detailPage.setUserAgent(DEFAULT_USER_AGENT);
-      await detailPage.setViewport({ width: 1920, height: 1080 });
+      await this.setupPage(detailPage);
 
-      await detailPage.goto(normalizedUrl, {
-        waitUntil: 'networkidle2',
-        timeout: 60000
-      });
+      await this.navigateToMapsPage(detailPage, normalizedUrl, { waitForDetail: true, timeout: 45000 });
 
-      // Tunggu title atau tombol phone muncul
-      await detailPage
-        .waitForSelector('h1.DUwDvf, button.CsEnBe[data-item-id^="phone:tel:"], a[href^="tel:"], div.Io6YTe', { timeout: 10000 })
-        .catch(() => {});
-
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 1000));
 
       // ── Ambil website SEGERA setelah halaman load, sebelum phone detection ──
       const websiteUrl = await this.extractWebsiteFromPage(detailPage);
@@ -661,23 +789,35 @@ class ScraperService {
         const normalizeNumber = (input) => {
           if (!input) return null;
           let cleaned = input.toString().trim();
-          cleaned = cleaned.replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '');
+          cleaned = cleaned.replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').replace(/\./g, '');
+
+          if (cleaned.startsWith('+1')) {
+            cleaned = cleaned.substring(2);
+          } else if (cleaned.startsWith('1') && cleaned.length === 11) {
+            cleaned = cleaned.substring(1);
+          }
 
           if (cleaned.startsWith('+62')) {
             cleaned = `0${cleaned.substring(3)}`;
-          } else if (cleaned.startsWith('62')) {
+          } else if (cleaned.startsWith('62') && cleaned.length >= 11) {
             cleaned = `0${cleaned.substring(2)}`;
           }
 
-          if (!cleaned.startsWith('0')) return null;
           if (!/^\d+$/.test(cleaned)) return null;
 
-          if (cleaned.startsWith('08')) {
-            if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
-            return null;
+          if (cleaned.length === 10 && /^[2-9]\d{9}$/.test(cleaned)) {
+            return cleaned;
           }
 
-          if (cleaned.length >= 9 && cleaned.length <= 12) {
+          if (cleaned.startsWith('08') && cleaned.length >= 10 && cleaned.length <= 13) {
+            return cleaned;
+          }
+
+          if (cleaned.startsWith('0') && cleaned.length >= 9 && cleaned.length <= 12) {
+            return cleaned;
+          }
+
+          if (cleaned.length >= 8 && cleaned.length <= 15) {
             return cleaned;
           }
 
@@ -690,18 +830,20 @@ class ScraperService {
           const matches = [];
 
           const patterns = [
-            /\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/g,              // 08xx dengan separator
-            /\b(08\d{8,10})\b/g,                                      // 08xx tanpa separator
-            /(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/g,       // +62 8xx atau 62 8xx
-            /(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/g,       // (021) 123 4567
-            /\b(0[2-7]\d{8,10})\b/g,                                  // 02112345678
-            /(\+?62[\s-]?\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4})/g         // +62 21 1234 5678
+            /\b(\+1[\s-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/g,
+            /\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/g,
+            /\b(08\d{8,10})\b/g,
+            /(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/g,
+            /(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/g,
+            /\b(0[2-7]\d{8,10})\b/g,
+            /(\+?62[\s-]?\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4})/g,
           ];
 
           for (const pattern of patterns) {
             let match;
             while ((match = pattern.exec(normalized)) !== null) {
-              const normalizedPhone = normalizeNumber(match[1]);
+              const raw = match[0];
+              const normalizedPhone = normalizeNumber(raw);
               if (normalizedPhone) {
                 matches.push(normalizedPhone);
               }
@@ -777,7 +919,7 @@ class ScraperService {
         const phonesArray = Array.from(foundPhones);
         if (phonesArray.length === 0) return null;
 
-        const mobilePhones = phonesArray.filter(p => p.startsWith('08'));
+        const mobilePhones = phonesArray.filter(p => p.startsWith('08') || p.length === 10);
         if (mobilePhones.length > 0) {
           return mobilePhones.reduce((best, phone) => (phone.length > best.length ? phone : best), mobilePhones[0]);
         }
@@ -804,33 +946,21 @@ class ScraperService {
     try {
       // Scroll ke elemen terlebih dahulu untuk memastikan terlihat
       await page.evaluate((idx) => {
-        const items = Array.from(document.querySelectorAll('div[role="feed"] div[jsaction]'));
+        const items = getFeedListItemsInBrowser();
         if (items[idx]) {
-          items[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+          items[idx].scrollIntoView({ behavior: 'auto', block: 'center' });
         }
       }, index);
       
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Cari elemen bisnis di list view berdasarkan index/nama dan klik elemen yang benar (card/anchor)
-      const clicked = await page.evaluate((name, idx) => {
-        const getListItems = () => {
-          // Urutan prioritas selector untuk cards di panel kiri
-          const selectors = [
-            'div[role="feed"] .Nv2PK',                    // card utama (Maps modern)
-            'div[role="feed"] a.hfpxzc',                  // anchor clickable
-            'div[role="feed"] > div > div[jsaction]',     // fallback lama
-          ];
-          for (const sel of selectors) {
-            const els = Array.from(document.querySelectorAll(sel));
-            if (els.length > 0) return els;
-          }
-          return [];
-        };
+      const clicked = await page.evaluate((name, idx, getItems, getName) => {
+        const items = getItems();
 
         const clickElement = (el) => {
           if (!el) return false;
-          const anchor = el.querySelector('a.hfpxzc');
+          const anchor = el.matches('a.hfpxzc') ? el : el.querySelector('a.hfpxzc');
           const target = anchor || el;
           target.scrollIntoView({ behavior: 'auto', block: 'center' });
           target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
@@ -840,21 +970,20 @@ class ScraperService {
           return true;
         };
 
-        const items = getListItems();
-        // 1) Berdasarkan index
         if (items[idx]) {
           return clickElement(items[idx]);
         }
-        // 2) Fallback berdasarkan nama yang cocok
+
+        const normalizedName = (name || '').trim().toLowerCase();
         for (const el of items) {
-          const nameEl = el.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd');
-          const text = nameEl ? (nameEl.innerText || nameEl.textContent || '').trim() : '';
-          if (text && text.toLowerCase() === (name || '').toLowerCase()) {
+          const itemName = getName(el);
+          if (itemName && itemName.trim().toLowerCase() === normalizedName) {
             return clickElement(el);
           }
         }
+
         return false;
-      }, businessName, index);
+      }, businessName, index, getFeedListItemsInBrowser, getBusinessNameFromListItem);
       
       if (!clicked) {
         console.log(`⚠️ Could not find business element: ${businessName}`);
@@ -914,14 +1043,14 @@ class ScraperService {
         
         // Jika belum terbuka, coba klik lagi
         if (attempt < 9) {
-          await page.evaluate((idx) => {
-            const items = Array.from(document.querySelectorAll('div[role="feed"] .Nv2PK, div[role="feed"] a.hfpxzc, div[role="feed"] > div > div[jsaction]'));
+          await page.evaluate((idx, getItems) => {
+            const items = getItems();
             if (items[idx]) {
               const el = items[idx];
-              const anchor = el.querySelector('a.hfpxzc');
+              const anchor = el.matches('a.hfpxzc') ? el : el.querySelector('a.hfpxzc');
               (anchor || el).click();
             }
-          }, index);
+          }, index, getFeedListItemsInBrowser);
         }
       }
       
@@ -1042,65 +1171,38 @@ class ScraperService {
 
         // Lakukan scroll bertahap pada panel detail sambil mencari nomor
         for (let s = 0; s < 12; s++) {
-          const found = await page.evaluate(() => {
-            const debug = [];
+          const found = await page.evaluate((extractPhone) => {
             const findPhone = () => {
-              // Prioritas: tombol phone
               const phoneButton = document.querySelector('button.CsEnBe[data-item-id^="phone:tel:"]');
-        if (phoneButton) {
+              if (phoneButton) {
                 const dataId = phoneButton.getAttribute('data-item-id') || '';
                 const match = dataId.match(/phone:tel:(\+?\d+)/i);
                 if (match && match[1]) return { phone: match[1], selector: 'button.CsEnBe[data-item-id^="phone:tel:"]' };
                 const visible = phoneButton.querySelector('.rogA2c .Io6YTe');
                 const text = visible ? (visible.innerText || visible.textContent || '').trim() : '';
                 if (text) {
-                  const cleaned = text.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '');
-                  if (cleaned.replace(/[^\d]/g, '').length >= 8) return { phone: cleaned, selector: 'button.CsEnBe .rogA2c .Io6YTe' };
+                  const cleaned = extractPhone(text);
+                  if (cleaned) return { phone: cleaned, selector: 'button.CsEnBe .rogA2c .Io6YTe' };
                 }
               }
-              // Class Io6YTe di panel
+
               const candidates = document.querySelectorAll('div.Io6YTe.fontBodyMedium, div.Io6YTe, div[class*="Io6YTe"]');
               for (const el of candidates) {
                 const t = (el.innerText || el.textContent || '').trim();
                 if (!t) continue;
-                
-                // Cek pattern dengan dash/spasi
-                let phoneMatch = t.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
-                if (phoneMatch) {
-                  const cleaned = phoneMatch[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-                  if (cleaned.length >= 10 && cleaned.length <= 15) {
-                    return { phone: cleaned, selector: 'div.Io6YTe*' };
-                  }
-                }
-                
-                // Cek pattern tanpa dash (10-13 digits)
-                phoneMatch = t.match(/\b(0\d{9,12})\b/);
-                if (phoneMatch && phoneMatch[1].startsWith('0')) {
-                  return { phone: phoneMatch[1], selector: 'div.Io6YTe*' };
-                }
-                
-                // Fallback: bersihkan dan cek
-                const cleaned = t.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '');
-                if (cleaned.length >= 10 && cleaned.length <= 15 && /^[\d+()-]+$/.test(cleaned) && cleaned.match(/^(\+?62|0)\d+$/)) {
-                  return { phone: cleaned, selector: 'div.Io6YTe*' };
-                }
+                const cleaned = extractPhone(t);
+                if (cleaned) return { phone: cleaned, selector: 'div.Io6YTe*' };
               }
-              
-              // Juga cari di semua DIV yang hanya berisi nomor
+
               const allDivs = document.querySelectorAll('div');
               for (const div of allDivs) {
                 const text = (div.innerText || div.textContent || '').trim();
-                if (text && /^[\d\s\-+()]{10,15}$/.test(text)) {
-                  const phoneMatch = text.match(/\b(0\d{9,12})\b/) || text.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
-                  if (phoneMatch) {
-                    const cleaned = phoneMatch[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-                    if (cleaned.length >= 10 && cleaned.length <= 15 && cleaned.startsWith('0')) {
-                      return { phone: cleaned, selector: 'div (phone-only)' };
-                    }
-                  }
+                if (text && /^[\d\s\-+().]{10,20}$/.test(text)) {
+                  const cleaned = extractPhone(text);
+                  if (cleaned) return { phone: cleaned, selector: 'div (phone-only)' };
                 }
               }
-              // Link tel:
+
               const tel = document.querySelector('a[href^="tel:"], a[href*="tel:"]');
               if (tel) {
                 const href = tel.getAttribute('href') || '';
@@ -1113,7 +1215,6 @@ class ScraperService {
             const result = findPhone();
             if (result) return { found: true, result };
 
-            // Scroll 1 layar pada panel detail
             const panel = document.querySelector('div.m6QErb.XiKgde[role="region"]') || document.querySelector('[role="main"]') || document.querySelector('div[jsaction*="pane"]');
             if (panel) {
               const before = panel.scrollTop;
@@ -1121,7 +1222,7 @@ class ScraperService {
               return { found: false, scrolled: panel.scrollTop !== before };
             }
             return { found: false, scrolled: false };
-          });
+          }, extractPhoneFromTextInBrowser);
           if (found && found.found) return found.result;
           await new Promise(r => setTimeout(r, 600));
         }
@@ -1137,8 +1238,9 @@ class ScraperService {
 
       // Jika belum ketemu, lanjutkan dengan strategi evaluate komprehensif
       // Verifikasi detail panel dan ambil hanya di dalam panel detail yang benar
-      const phoneResult = await page.evaluate((expectedBusinessName) => {
+      const phoneResult = await page.evaluate((expectedBusinessName, extractPhone) => {
         const debugLog = [];
+        const extractPhoneFromText = extractPhone;
         
         // Cari detail panel yang benar (bukan hasil pencarian)
         // Detail panel biasanya memiliki struktur spesifik
@@ -1311,139 +1413,6 @@ class ScraperService {
         } catch (e) {
           debugLog.push(`Error reading CsEnBe phone button: ${e.message}`);
         }
-        
-        // Helper function untuk extract phone number dari text
-        // PRIORITAS: Nomor HP (08xx) lebih diprioritaskan daripada nomor telepon kantor
-        const extractPhoneFromText = (text) => {
-          if (!text || !text.trim()) return null;
-          
-          // Normalize text: remove extra whitespace
-          const normalized = text.trim();
-          
-          // PRIORITY 1: Nomor HP (08xx) - Format tanpa dash/spasi (081234567890, 0812-3456-7890, 0812 3456 7890)
-          // Pattern untuk nomor HP yang dimulai dengan 08 - DIPRIORITASKAN
-          const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
-          if (hpPattern08) {
-            const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.length >= 10 && cleaned.length <= 13 && cleaned.startsWith('08')) {
-              return cleaned;
-            }
-          }
-          
-          // PRIORITY 2: Nomor HP (08xx) - Format panjang tanpa separator
-          const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
-          if (hpPattern08Long) {
-            const num = hpPattern08Long[1];
-            if (num.length >= 10 && num.length <= 13) {
-              return num;
-            }
-          }
-          
-          // PRIORITY 3: Nomor HP dengan format +62 8xx atau 62 8xx
-          const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-          if (hpPattern62) {
-            let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.startsWith('+62') && cleaned.length >= 12) {
-              cleaned = '0' + cleaned.substring(3);
-            } else if (cleaned.startsWith('62') && cleaned.length >= 11 && !cleaned.startsWith('+62')) {
-              cleaned = '0' + cleaned.substring(2);
-            }
-            if (cleaned.length >= 10 && cleaned.length <= 13 && cleaned.startsWith('08')) {
-              return cleaned;
-            }
-          }
-          
-          // PRIORITY 4: Semua nomor HP yang dimulai dengan 08 (catch-all) - cari semua yang ada
-          const allHpNumbers = normalized.match(/\b(08\d{8,10})\b/g);
-          if (allHpNumbers && allHpNumbers.length > 0) {
-            // Ambil yang pertama dan paling lengkap
-            const longestHp = allHpNumbers.reduce((a, b) => a.length > b.length ? a : b);
-            if (longestHp.length >= 10 && longestHp.length <= 13) {
-              return longestHp;
-            }
-          }
-          
-          // PRIORITY 5: Format dengan dash/spasi untuk nomor HP (0812-3723-6716 atau 0812 3723 6716)
-          const dashPatternHp = normalized.match(/(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
-          if (dashPatternHp) {
-            const cleaned = dashPatternHp[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.length >= 10 && cleaned.length <= 13 && cleaned.startsWith('08')) {
-              return cleaned;
-            }
-          }
-          
-          // FALLBACK 1: Nomor telepon kantor dengan tanda kurung (021) 1234-5678 atau (021)12345678
-          const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-          if (landlinePattern) {
-            let cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
-            // Validasi: nomor telepon kantor biasanya dimulai dengan 02x, 03x, 04x, 05x, 06x, 07x (bukan 08)
-            if (cleaned.length >= 9 && cleaned.length <= 12 && !cleaned.startsWith('08')) {
-              return cleaned;
-            }
-          }
-          
-          // FALLBACK 2: Format tanpa dash untuk nomor lain (bukan 08) - 10-13 digits
-          const noDashPattern = normalized.match(/\b(0[2-7]\d{8,10})\b/);
-          if (noDashPattern) {
-            const num = noDashPattern[1];
-            // Skip jika sudah 08 (sudah di-handle di atas), hanya ambil telepon kantor (02x-07x)
-            if (!num.startsWith('08') && num.length >= 10 && num.length <= 12) {
-              return num;
-            }
-          }
-          
-          // FALLBACK 3: Format +62 untuk nomor HP atau telepon kantor (jika belum ketemu 08)
-          const indonesiaPattern = normalized.match(/(\+?62[\s-]?\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-          if (indonesiaPattern) {
-            let cleaned = indonesiaPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            // Normalize +62 menjadi 0
-            if (cleaned.startsWith('+62') && cleaned.length >= 12) {
-              cleaned = '0' + cleaned.substring(3);
-            } else if (cleaned.startsWith('62') && cleaned.length >= 11 && !cleaned.startsWith('+62')) {
-              cleaned = '0' + cleaned.substring(2);
-            }
-            if (cleaned.length >= 10 && cleaned.length <= 13) {
-              // Prioritas ke 08 jika ada
-              if (cleaned.startsWith('08')) {
-                return cleaned;
-              }
-              // Fallback ke nomor lain jika tidak ada 08
-              return cleaned;
-            }
-          }
-          
-          // FALLBACK 4: Bersihkan text dan cek apakah hanya angka/karakter telepon
-          let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').trim();
-          
-          // Remove parentheses jika ada
-          cleaned = cleaned.replace(/[()]/g, '');
-          
-          if (cleaned.length >= 10 && cleaned.length <= 15 && /^[\d+]+$/.test(cleaned)) {
-            // Normalize +62 menjadi 0
-            if (cleaned.startsWith('+62') && cleaned.length >= 12) {
-              cleaned = '0' + cleaned.substring(3);
-            } else if (cleaned.startsWith('62') && cleaned.length >= 11 && !cleaned.startsWith('+62')) {
-              cleaned = '0' + cleaned.substring(2);
-            }
-            // Prioritas ke 08 jika ada
-            if (cleaned.match(/^08\d{8,10}$/)) {
-              return cleaned;
-            }
-            // Fallback ke nomor lain jika tidak ada 08
-            if (cleaned.match(/^0\d{9,12}$/)) {
-              return cleaned;
-            }
-          }
-          
-          // FALLBACK 5: Cari dalam text yang mungkin memiliki prefix seperti "Tel:", "Phone:", "HP:", dll
-          const withPrefixPattern = normalized.match(/(?:tel|phone|hp|wa|whatsapp|mobile)[\s:]*([\d\s\-+()]{10,15})/i);
-          if (withPrefixPattern && withPrefixPattern[1]) {
-            const phoneNum = extractPhoneFromText(withPrefixPattern[1]);
-            if (phoneNum) return phoneNum;
-          }
-          
-          return null;
-        };
         
         // Method 0: Cari langsung di div dengan class Io6YTe (selector spesifik Google Maps)
         // Berdasarkan elemen yang user berikan: <div class="Io6YTe fontBodyMedium kR99db fdkmkc ">0812-3723-6716</div>
@@ -1721,7 +1690,7 @@ class ScraperService {
         }
         
         return { phone: null, debugLog: debugLog };
-      }, businessName);
+      }, businessName, extractPhoneFromTextInBrowser);
       
       // Extract phone dari result dan log debugging
       let phone = null;
@@ -2241,15 +2210,9 @@ class ScraperService {
     console.log(`\n🔍 [${keywordIndex + 1}/${session.totalKeywords}] Keyword: ${keyword}`);
     console.log(`📍 Opening: ${url}`);
 
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 60000,
-    });
+    await this.navigateToMapsPage(page, url, { waitForFeed: true });
 
-    await this.dismissGoogleConsent(page);
-
-    await page.waitForSelector('div[role="feed"]', { timeout: 10000 });
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
     await this.scrollResultsWithSession(page, session.maxResults, sessionId);
 
