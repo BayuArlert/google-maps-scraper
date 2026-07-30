@@ -4,6 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
+    "startCommand": "cd backend && node src/server.js",
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE"
   }
