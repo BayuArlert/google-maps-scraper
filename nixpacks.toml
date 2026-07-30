@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["chromium", "nodejs"]
+nixPkgs = ["chromium", "nodejs", "nss", "alsa-lib", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "mesa", "pango", "cairo", "libXcomposite", "libXdamage", "libXext", "libXfixes", "libXrandr", "libxcb", "libxshmfence"]
 
 [phases.build]
 cmds = ["npm install", "npm run build", "cd backend && npm install", "cd backend && npx puppeteer browsers install chrome"]
