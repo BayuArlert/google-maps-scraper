@@ -266,6 +266,7 @@ class ScraperService {
               category: category || 'N/A',
               address: address || 'N/A',
               phone: phone || 'N/A', // Akan diisi dari detail page jika kosong
+              website: 'Tidak',
               detailUrl: detailUrl || ''
             });
           } catch (err) {
@@ -292,7 +293,9 @@ class ScraperService {
           const business = businesses[i];
           console.log(`📞 [${i + 1}/${businesses.length}] Getting phone for: ${business.name}`);
           
-          const phone = await this.getPhoneNumber(browser, page, business, i);
+          const result = await this.getPhoneNumber(browser, page, business, i);
+          const phone = typeof result === 'object' ? result.phone : result;
+          const website = typeof result === 'object' ? result.website : 'Tidak';
           if (phone && phone !== 'N/A' && phone.length >= 8) {
             businesses[i].phone = phone;
             phoneCount++;
@@ -301,6 +304,7 @@ class ScraperService {
             businesses[i].phone = 'N/A';
             console.log(`❌ No phone found for: ${business.name}`);
           }
+          businesses[i].website = website || 'Tidak';
           
           // Delay untuk avoid detection
           await new Promise(resolve => setTimeout(resolve, 1500));
@@ -433,23 +437,116 @@ class ScraperService {
   }
 
   async getPhoneNumber(browser, page, business, index) {
-    if (!business) return null;
+    if (!business) return { phone: null, website: 'Tidak' };
 
     const businessName = business.name || '';
     const detailUrl = business.detailUrl || '';
 
     if (detailUrl) {
       try {
-        const phoneFromDetail = await this.getPhoneNumberFromDetailUrl(browser, detailUrl, businessName);
-        if (phoneFromDetail && phoneFromDetail.length >= 8) {
-          return phoneFromDetail;
+        const result = await this.getPhoneNumberFromDetailUrl(browser, detailUrl, businessName);
+        if (result && result.phone && result.phone.length >= 8) {
+          return result;
+        }
+        // Phone not found via detailUrl, but website might still have been found
+        if (result && result.website && result.website !== 'Tidak') {
+          // Try list for phone but keep website
+          const listPhone = await this.getPhoneNumberFromList(page, businessName, index);
+          const listResult = typeof listPhone === 'object' ? listPhone : { phone: listPhone, website: 'Tidak' };
+          return { phone: listResult.phone, website: result.website };
         }
       } catch (error) {
         console.warn(`⚠️ Gagal ambil nomor lewat detail URL (${businessName}): ${error.message}`);
       }
     }
 
-    return await this.getPhoneNumberFromList(page, businessName, index);
+    const listResult = await this.getPhoneNumberFromList(page, businessName, index);
+    if (typeof listResult === 'object' && listResult !== null) return listResult;
+    return { phone: listResult, website: 'Tidak' };
+  }
+
+  /**
+   * Ekstrak URL website dari halaman/panel detail Google Maps yang sudah terbuka.
+   * Coba berbagai selector dan scroll panel agar elemen ter-render.
+   * @param {import('puppeteer').Page} page - Puppeteer page (bisa detailPage maupun main page)
+   * @returns {Promise<string>} URL website atau 'Tidak'
+   */
+  /**
+   * Ekstrak URL website dari halaman/panel detail Google Maps yang sudah terbuka.
+   * Menggunakan waitForSelector + async waits agar lazy-load benar-benar ter-trigger.
+   */
+  async extractWebsiteFromPage(page) {
+    try {
+      // Coba waitForSelector dulu dengan timeout singkat
+      await page
+        .waitForSelector('a.CsEnBe[data-item-id="authority"], a[data-item-id="authority"]', { timeout: 3000 })
+        .catch(() => {});
+
+      // Scroll panel ke atas (website ada di atas panel) lalu tunggu render
+      await page.evaluate(() => {
+        const panel =
+          document.querySelector('div.m6QErb.XiKgde[role="region"]') ||
+          document.querySelector('[role="main"]') ||
+          document.querySelector('div[jsaction*="pane"]') ||
+          document.scrollingElement ||
+          document.body;
+        if (panel) panel.scrollTop = 0;
+      });
+      await new Promise(r => setTimeout(r, 800));
+
+      // Kueri dengan beberapa selector
+      const href = await page.evaluate(() => {
+        const selectors = [
+          'a.CsEnBe[data-item-id="authority"]',
+          'a[data-item-id="authority"]',
+          'a[data-tooltip="Buka situs"][href^="http"]',
+          'a[data-tooltip="Open website"][href^="http"]',
+          'a[aria-label*="Situs Web"][href^="http"]',
+          'a[aria-label*="Web site"][href^="http"]',
+          'a[aria-label*="Website"][href^="http"]',
+          'a.lcr4fd[href^="http"]',
+        ];
+        for (const sel of selectors) {
+          try {
+            const el = document.querySelector(sel);
+            if (el) {
+              const h = el.getAttribute('href');
+              if (h && h.startsWith('http') && !h.includes('google.') && !h.includes('goo.gl')) return h;
+            }
+          } catch(e) {}
+        }
+        // Fallback: cari semua <a> eksternal di seluruh dokumen
+        const allAnchors = document.querySelectorAll('a[href^="http"]');
+        for (const a of allAnchors) {
+          const h = a.getAttribute('href');
+          if (h && !h.includes('google.') && !h.includes('goo.gl') && !h.includes('maps.app')) return h;
+        }
+        return null;
+      });
+
+      // Debug: selalu log apa yang ditemukan
+      if (href) {
+        console.log(`🌐 Website ditemukan: ${href}`);
+        return href;
+      }
+
+      // Debug info: log elemen CsEnBe yang ada
+      const debugInfo = await page.evaluate(() => {
+        const els = document.querySelectorAll('.CsEnBe, [data-item-id]');
+        return Array.from(els).slice(0, 10).map(el => ({
+          tag: el.tagName,
+          dataItemId: el.getAttribute('data-item-id'),
+          href: el.getAttribute('href'),
+          ariaLabel: el.getAttribute('aria-label'),
+        }));
+      });
+      console.log('🔍 extractWebsiteFromPage debug (tidak ketemu):', JSON.stringify(debugInfo));
+
+      return 'Tidak';
+    } catch (err) {
+      console.warn(`⚠️ extractWebsiteFromPage error: ${err.message}`);
+      return 'Tidak';
+    }
   }
 
   async getPhoneNumberFromDetailUrl(browser, detailUrl, businessName) {
@@ -475,9 +572,13 @@ class ScraperService {
         .waitForSelector('h1.DUwDvf, button.CsEnBe[data-item-id^="phone:tel:"], a[href^="tel:"], div.Io6YTe', { timeout: 10000 })
         .catch(() => {});
 
-      await detailPage.waitForTimeout(2000);
+      await new Promise(r => setTimeout(r, 2000));
 
-      // Scroll ringan untuk memicu lazy load
+      // ── Ambil website SEGERA setelah halaman load, sebelum phone detection ──
+      const websiteUrl = await this.extractWebsiteFromPage(detailPage);
+      console.log(`🌐 [DetailUrl] Website untuk "${businessName}": ${websiteUrl}`);
+
+      // Scroll ringan untuk memicu lazy load (untuk phone detection)
       await detailPage.evaluate(() => {
         const scrollTarget = document.querySelector('[role="main"]') || document.scrollingElement || document.body;
         if (scrollTarget) {
@@ -490,7 +591,7 @@ class ScraperService {
         }
       });
 
-      await detailPage.waitForTimeout(1000);
+      await new Promise(r => setTimeout(r, 1000));
 
       const phone = await detailPage.evaluate((expectedBusinessName) => {
         const normalizeNumber = (input) => {
@@ -620,10 +721,10 @@ class ScraperService {
         return phonesArray.reduce((best, phone) => (phone.length > best.length ? phone : best), phonesArray[0]);
       }, businessName);
 
-      return phone || null;
+      return { phone: phone || null, website: websiteUrl };
     } catch (error) {
       console.warn(`⚠️ Detail page extraction error for ${businessName}: ${error.message}`);
-      return null;
+      return { phone: null, website: 'Tidak' };
     } finally {
       if (detailPage) {
         try {
@@ -842,11 +943,11 @@ class ScraperService {
       });
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // PENTING: Cari nomor telepon dulu di tab default (Ringkasan/Overview) 
-      // karena nomor telepon biasanya ada di sana, BUKAN di tab About/Tentang
-      // Hanya pindah ke tab lain kalau tidak ketemu di tab default
+      // ── Ambil website SEGERA setelah panel terbuka, sebelum phone detection ──
+      const websiteUrl = await this.extractWebsiteFromPage(page);
+      console.log(`🌐 [ListPanel] Website untuk "${businessName}": ${websiteUrl}`);
 
-      // Scroll dan cari nomor telepon secara bertahap di panel detail (beberapa data berada di bawah fold)
+      // PENTING: Cari nomor telepon dulu di tab default
       const tryFindPhoneWithScrolling = async () => {
         // Polling cepat untuk elemen tombol telepon yang sering ada
         for (let p = 0; p < 6; p++) {
@@ -1916,6 +2017,8 @@ class ScraperService {
         }
       }
 
+      // Ambil website dari detail panel yang sedang terbuka menggunakan helper
+      // (sudah diambil lebih awal di atas, gunakan websiteUrl yang sudah ada)
       // Kembali ke list view dengan klik di area kosong atau ESC
       try {
         await page.keyboard.press('Escape');
@@ -1924,10 +2027,10 @@ class ScraperService {
         // Ignore error
       }
 
-      return phone;
+      return { phone, website: websiteUrl };
     } catch (err) {
       console.error(`Error in getPhoneNumber for ${businessName}:`, err.message);
-      return null;
+      return { phone: null, website: 'Tidak' };
     }
   }
 
@@ -2147,6 +2250,7 @@ class ScraperService {
             category: category || 'N/A',
             address: address || 'N/A',
             phone: 'N/A',
+            website: 'Tidak',
             detailUrl: detailUrl || '',
           });
         } catch (err) {
@@ -2213,11 +2317,13 @@ class ScraperService {
         console.log(`📞 [${i + 1}/${businessesToProcess.length}] ${keyword}: ${business.name}`);
 
         if (!business.phone || business.phone === 'N/A') {
-          const phone = await this.getPhoneNumber(browser, page, business, i);
-          if (phone && phone.length >= 8) {
-            business.phone = phone;
-          } else {
-            business.phone = 'N/A';
+          const result = await this.getPhoneNumber(browser, page, business, i);
+          const phone = typeof result === 'object' ? result.phone : result;
+          const website = typeof result === 'object' ? result.website : 'Tidak';
+          business.phone = (phone && phone.length >= 8) ? phone : 'N/A';
+          if (website && website !== 'Tidak') {
+            business.website = website;
+            console.log(`💾 Saved website for ${business.name}: ${business.website}`);
           }
         }
 
@@ -2232,6 +2338,7 @@ class ScraperService {
           rating: item.rating || 'N/A',
           address: item.address || 'N/A',
           category: item.category || 'N/A',
+          website: item.website || 'Tidak',
           keyword,
         }));
 
@@ -2274,6 +2381,7 @@ class ScraperService {
       rating: item.rating || 'N/A',
       address: item.address || 'N/A',
       category: item.category || 'N/A',
+      website: item.website || 'Tidak',
       keyword,
     }));
 

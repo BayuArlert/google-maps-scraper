@@ -172,6 +172,7 @@ export default function GoogleMapsScraper() {
       'Alamat': result.address,
       'Rating': result.rating,
       'Kategori': result.category,
+      'Website': result.website,
       'Keyword': result.keyword
     }));
 
@@ -186,6 +187,7 @@ export default function GoogleMapsScraper() {
       { wch: 50 },
       { wch: 15 },
       { wch: 25 },
+      { wch: 15 },
       { wch: 20 }
     ];
 
@@ -230,6 +232,7 @@ export default function GoogleMapsScraper() {
           address: business.address || 'N/A',
           rating: business.rating || 'N/A',
           category: business.category || 'N/A',
+          website: business.website || 'Tidak',
           keyword: business.keyword || status.currentKeyword || '',
         }));
         setResults(formattedData);
@@ -360,6 +363,7 @@ export default function GoogleMapsScraper() {
           address: business.address || 'N/A',
           rating: business.rating || 'N/A',
           category: business.category || 'N/A',
+          website: business.website || 'Tidak',
           keyword: business.keyword || ''
         }));
         setResults(formattedData);
@@ -934,7 +938,8 @@ export default function GoogleMapsScraper() {
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Rating</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Kategori</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Alamat</th>
-                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Telepon</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Nomor Telepon</th>
+                    <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Website</th>
                     <th className="px-4 py-3 text-left text-sm font-semibold text-gray-700">Keyword</th>
                   </tr>
                 </thead>
@@ -947,6 +952,22 @@ export default function GoogleMapsScraper() {
                       <td className="px-4 py-3 text-sm text-gray-600">{result.category}</td>
                       <td className="px-4 py-3 text-sm text-gray-600">{result.address}</td>
                       <td className="px-4 py-3 text-sm text-gray-800">{result.phone}</td>
+                      <td className="px-4 py-3 text-sm text-gray-800">
+                        {result.website && result.website !== 'Tidak' ? (
+                          <a
+                            href={result.website}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:underline text-xs"
+                          >
+                            Ada
+                          </a>
+                        ) : (
+                          <span className="px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-700">
+                            Tidak
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-sm">
                         <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs">
                           {result.keyword}
