@@ -19,6 +19,134 @@ const CHROME_PATH = findChrome();
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+function countResultCardsInBrowser() {
+  const feed = document.querySelector('div[role="feed"]');
+  if (!feed) return 0;
+
+  const cardCount = feed.querySelectorAll('a.hfpxzc, .Nv2PK, div[role="article"]').length;
+  if (cardCount > 0) return cardCount;
+
+  return feed.querySelectorAll('div[jsaction]').length;
+}
+
+function extractBusinessesInBrowser(keywordLabel) {
+  const results = [];
+  const seenNames = new Set();
+  const feed = document.querySelector('div[role="feed"]');
+
+  if (!feed) {
+    return results;
+  }
+
+  let items = [];
+  const cardSelectors = [
+    'a.hfpxzc',
+    '.Nv2PK',
+    'div[role="article"]',
+  ];
+
+  for (const selector of cardSelectors) {
+    const found = Array.from(feed.querySelectorAll(selector));
+    if (found.length > items.length) {
+      items = found;
+    }
+  }
+
+  if (items.length === 0) {
+    const allDivs = feed.querySelectorAll('div[jsaction]');
+    items = Array.from(allDivs).filter(div => div.querySelector('a.hfpxzc'));
+  }
+
+  if (items.length === 0) {
+    items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
+  }
+
+  items.forEach((item) => {
+    try {
+      const card = item.matches('a.hfpxzc')
+        ? (item.closest('.Nv2PK') || item.parentElement || item)
+        : item;
+      const linkElement = card.querySelector('a.hfpxzc') || (item.matches('a.hfpxzc') ? item : null);
+
+      let name = '';
+      if (linkElement) {
+        name = (linkElement.getAttribute('aria-label') || linkElement.innerText || linkElement.textContent || '').trim();
+      }
+
+      if (!name) {
+        const nameElement = card.querySelector('div.fontHeadlineSmall') ||
+          card.querySelector('[class*="fontHeadline"]') ||
+          card.querySelector('.qBF1Pd') ||
+          card.querySelector('div[aria-label]');
+        name = nameElement
+          ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
+          : '';
+      }
+
+      if (!name || seenNames.has(name)) return;
+      seenNames.add(name);
+
+      const ratingElement = card.querySelector('span[role="img"]') ||
+        card.querySelector('[aria-label*="stars"]') ||
+        card.querySelector('[aria-label*="Star"]');
+      let rating = '';
+      if (ratingElement) {
+        const ratingText = ratingElement.getAttribute('aria-label') || '';
+        const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
+        rating = ratingMatch ? ratingMatch[1] : '';
+      }
+
+      const categoryElement = card.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
+        card.querySelector('[class*="fontBodyMedium"] span');
+      const category = categoryElement ? (categoryElement.innerText || categoryElement.textContent || '').trim() : '';
+
+      const addressElements = card.querySelectorAll('div.fontBodyMedium > div > div');
+      let address = '';
+      addressElements.forEach(el => {
+        const text = (el.innerText || el.textContent || '').trim();
+        if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m|mi|ft)$/) && text !== category && text !== name) {
+          address = text;
+        }
+      });
+
+      if (!address) {
+        const addressText = card.querySelector('[class*="fontBodyMedium"]');
+        if (addressText) {
+          const text = (addressText.innerText || addressText.textContent || '').trim();
+          if (text && !text.includes('★') && text !== category && text !== name) {
+            address = text;
+          }
+        }
+      }
+
+      let detailUrl = linkElement ? linkElement.href : '';
+      if (detailUrl && detailUrl.startsWith('/')) {
+        detailUrl = `https://www.google.com${detailUrl}`;
+      }
+
+      const business = {
+        name,
+        rating: rating || 'N/A',
+        category: category || 'N/A',
+        address: address || 'N/A',
+        phone: 'N/A',
+        website: 'Tidak',
+        detailUrl: detailUrl || '',
+      };
+
+      if (keywordLabel) {
+        business.keyword = keywordLabel;
+      }
+
+      results.push(business);
+    } catch (err) {
+      console.error('Error parsing item:', err.message);
+    }
+  });
+
+  return results;
+}
+
 class ScraperService {
   constructor() {
     this.activeBrowsers = new Map(); // Store browser instances for stopping
@@ -90,6 +218,84 @@ class ScraperService {
 
     return launchOptions;
   }
+
+  async setupPage(page) {
+    await page.setUserAgent(DEFAULT_USER_AGENT);
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+    });
+  }
+
+  async dismissGoogleConsent(page) {
+    try {
+      const dismissed = await page.evaluate(() => {
+        const selectors = [
+          '#L2AGLb',
+          'button[aria-label*="Accept all"]',
+          'button[aria-label*="Terima semua"]',
+          'button[aria-label*="Accept"]',
+          'form[action*="consent"] button',
+        ];
+
+        for (const selector of selectors) {
+          const button = document.querySelector(selector);
+          if (button && button.offsetParent !== null) {
+            button.click();
+            return selector;
+          }
+        }
+
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const match = buttons.find((button) => {
+          const text = (button.innerText || button.textContent || '').trim().toLowerCase();
+          return text === 'accept all'
+            || text === 'i agree'
+            || text === 'terima semua'
+            || text === 'setuju semua';
+        });
+
+        if (match) {
+          match.click();
+          return 'text-match';
+        }
+
+        return null;
+      });
+
+      if (dismissed) {
+        console.log(`🍪 Dismissed Google consent dialog (${dismissed})`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    } catch (err) {
+      console.warn(`⚠️ Consent dialog handling skipped: ${err.message}`);
+    }
+  }
+
+  async logExtractionDiagnostics(page, contextLabel) {
+    try {
+      const diagnostics = await page.evaluate(() => {
+        const feed = document.querySelector('div[role="feed"]');
+        return {
+          hasFeed: !!feed,
+          hfpxzcCount: feed ? feed.querySelectorAll('a.hfpxzc').length : 0,
+          nv2pkCount: feed ? feed.querySelectorAll('.Nv2PK').length : 0,
+          jsactionCount: feed ? feed.querySelectorAll('div[jsaction]').length : 0,
+          sampleNames: feed
+            ? Array.from(feed.querySelectorAll('a.hfpxzc'))
+              .slice(0, 3)
+              .map(link => link.getAttribute('aria-label') || link.innerText || '')
+            : [],
+          pageTitle: document.title || '',
+        };
+      });
+
+      console.warn(`⚠️ Extraction returned 0 results for ${contextLabel}:`, diagnostics);
+    } catch (err) {
+      console.warn(`⚠️ Failed to collect extraction diagnostics: ${err.message}`);
+    }
+  }
+
   async scrapeGoogleMaps(keyword, location = '', maxResults = 0, options = {}) {
     let browser;
     
@@ -101,12 +307,7 @@ class ScraperService {
       browser = await puppeteer.launch(launchOptions);
 
       const page = await browser.newPage();
-      
-      // Set user agent untuk bypass detection
-      await page.setUserAgent(DEFAULT_USER_AGENT);
-
-      // Set viewport
-      await page.setViewport({ width: 1920, height: 1080 });
+      await this.setupPage(page);
 
       // Build search query
       const searchQuery = location 
@@ -124,6 +325,8 @@ class ScraperService {
         timeout: 60000 
       });
 
+      await this.dismissGoogleConsent(page);
+
       // Wait for results to load
       await page.waitForSelector('div[role="feed"]', { timeout: 10000 });
       
@@ -134,157 +337,11 @@ class ScraperService {
       await this.scrollResults(page, maxResults);
 
       // Extract data
-      const businesses = await page.evaluate((maxResults) => {
-        const results = [];
-        
-        let items = [];
-        const feed = document.querySelector('div[role="feed"]');
-        if (feed) {
-          // Ambil semua result card - Google Maps recent DOM uses nested divs inside feed
-          const allDivs = feed.querySelectorAll('div[jsaction]');
-          // Filter: hanya ambil div yang punya link detail (hfpxzc class) = result card
-          items = Array.from(allDivs).filter(div => div.querySelector('a.hfpxzc'));
-        }
+      const businesses = await page.evaluate(extractBusinessesInBrowser, null);
 
-        if (items.length === 0) {
-          // Fallback: coba selector lain
-          const feed2 = document.querySelector('div[role="feed"]');
-          if (feed2) {
-            items = Array.from(feed2.querySelectorAll('div[role="article"], div.Nv2PK'));
-          }
-        }
-
-        // Deduplicate berdasarkan nama
-        const seenNames = new Set();
-
-        items.forEach((item) => {
-          // Tidak ada limit, ambil semua hasil
-
-          try {
-            // Nama bisnis
-            const nameElement = item.querySelector('div.fontHeadlineSmall') || 
-                              item.querySelector('[class*="fontHeadline"]') ||
-                              item.querySelector('a.hfpxzc') ||
-                              item.querySelector('div[aria-label]');
-            const name = nameElement ? (nameElement.getAttribute('aria-label') || nameElement.innerText || '').trim() : '';
-
-            // Skip jika tidak ada nama atau sudah pernah dilihat
-            if (!name || seenNames.has(name)) return;
-            seenNames.add(name);
-
-            // Rating dan reviews
-            const ratingElement = item.querySelector('span[role="img"]');
-            let rating = '';
-            if (ratingElement) {
-              rating = ratingElement.getAttribute('aria-label') || '';
-              // Extract rating dari text seperti "4.5 stars"
-              const ratingMatch = rating.match(/(\d+\.?\d*)/);
-              if (ratingMatch) {
-                rating = ratingMatch[1];
-              }
-            }
-
-            // Kategori
-            const categoryElement = item.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
-                                   item.querySelector('[class*="fontBodyMedium"] span');
-            const category = categoryElement ? categoryElement.innerText.trim() : '';
-
-            // Alamat
-            const addressElements = item.querySelectorAll('div.fontBodyMedium > div > div');
-            let address = '';
-            addressElements.forEach(el => {
-              const text = el.innerText.trim();
-              if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m)$/) && text !== category) {
-                address = text;
-              }
-            });
-
-            // Jika alamat masih kosong, coba cari dengan selector lain
-            if (!address) {
-              const addressText = item.querySelector('[class*="fontBodyMedium"]');
-              if (addressText) {
-                const text = addressText.innerText.trim();
-                if (text && !text.includes('★') && text !== category && text !== name) {
-                  address = text;
-                }
-              }
-            }
-
-            // Coba ambil nomor telepon dari list view (jarang muncul tapi kadang ada)
-            let phone = '';
-            const linkElement = item.querySelector('a.hfpxzc');
-            let detailUrl = linkElement ? linkElement.href : '';
-            if (detailUrl && detailUrl.startsWith('/')) {
-              detailUrl = `https://www.google.com${detailUrl}`;
-            }
-            
-            // Method 1: Cari di div dengan class Io6YTe (selector spesifik Google Maps)
-            const phoneDivs = item.querySelectorAll('div.Io6YTe, div[class*="Io6YTe"]');
-            for (const div of phoneDivs) {
-              const text = div.innerText || div.textContent || '';
-              if (text) {
-                const cleaned = text.replace(/\s+/g, '').replace(/[^\d+()-]/g, '').trim();
-                if (cleaned.length >= 8 && cleaned.length <= 20 && /^[\d+()-]+$/.test(cleaned)) {
-                  phone = cleaned;
-                  break;
-                }
-              }
-            }
-            
-            // Method 2: Coba selector lainnya jika belum ketemu
-            if (!phone) {
-              const phoneSelectors = [
-                'button[data-item-id*="phone"]',
-                'button[data-value*="phone"]',
-                'a[href^="tel:"]',
-                'span[aria-label*="phone"]',
-                'div[aria-label*="phone"]'
-              ];
-              
-              for (const selector of phoneSelectors) {
-                const phoneElement = item.querySelector(selector);
-                if (phoneElement) {
-                  // Coba ambil dari berbagai atribut
-                  phone = phoneElement.getAttribute('data-item-id') || 
-                         phoneElement.getAttribute('data-value') ||
-                         phoneElement.getAttribute('href') ||
-                         phoneElement.getAttribute('aria-label') ||
-                         phoneElement.innerText || '';
-                  
-                  // Clean up phone number
-                  if (phone) {
-                    phone = phone.replace(/phone:tel:/gi, '')
-                                 .replace(/tel:/gi, '')
-                                 .replace(/\s+/g, '')
-                                 .replace(/[^\d+()-]/g, '')
-                                 .trim();
-                    // Validasi minimal 8 digit
-                    if (phone && phone.replace(/[^\d]/g, '').length >= 8) {
-                      break;
-                    } else {
-                      phone = ''; // Reset jika tidak valid
-                    }
-                  }
-                }
-              }
-            }
-            
-              results.push({
-                name,
-              rating: rating || 'N/A',
-              category: category || 'N/A',
-              address: address || 'N/A',
-              phone: phone || 'N/A', // Akan diisi dari detail page jika kosong
-              website: 'Tidak',
-              detailUrl: detailUrl || ''
-            });
-          } catch (err) {
-            console.error('Error parsing item:', err.message);
-          }
-        });
-
-        return results;
-      }, maxResults);
+      if (businesses.length === 0) {
+        await this.logExtractionDiagnostics(page, `keyword "${searchQuery}"`);
+      }
 
       console.log(`✅ Found ${businesses.length} businesses`);
 
@@ -389,9 +446,7 @@ class ScraperService {
         }
         
         // Cek jumlah item yang sudah ter-load
-        const currentItemCount = await page.evaluate(() => {
-          return document.querySelectorAll('div[role="feed"] div[jsaction]').length;
-        });
+        const currentItemCount = await page.evaluate(countResultCardsInBrowser);
         
         const currentHeight = scrollResult.scrollHeight;
         
@@ -2100,8 +2155,7 @@ class ScraperService {
       this.activeBrowsers.set(sessionId, browser);
 
       const page = await browser.newPage();
-      await page.setUserAgent(DEFAULT_USER_AGENT);
-      await page.setViewport({ width: 1920, height: 1080 });
+      await this.setupPage(page);
 
       let processing = true;
 
@@ -2192,83 +2246,18 @@ class ScraperService {
       timeout: 60000,
     });
 
+    await this.dismissGoogleConsent(page);
+
     await page.waitForSelector('div[role="feed"]', { timeout: 10000 });
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     await this.scrollResultsWithSession(page, session.maxResults, sessionId);
 
-    const businesses = await page.evaluate((maxResults, keywordLabel) => {
-      const results = [];
+    const businesses = await page.evaluate(extractBusinessesInBrowser, keyword);
 
-      const selectors = [
-        'div[role="feed"] > div > div[jsaction]',
-        'div[role="feed"] > div[jsaction]',
-        'div[role="feed"] div[jsaction].m6QErb',
-      ];
-
-      let items = [];
-      for (const selector of selectors) {
-        const found = document.querySelectorAll(selector);
-        if (found.length > items.length) {
-          items = Array.from(found);
-        }
-      }
-
-      if (items.length === 0) {
-        const feed = document.querySelector('div[role="feed"]');
-        if (feed) {
-          items = Array.from(feed.querySelectorAll('div[jsaction]'));
-        }
-      }
-
-      const seenNames = new Set();
-
-      items.forEach(item => {
-        try {
-          const nameElement = item.querySelector('div.fontHeadlineSmall') ||
-            item.querySelector('[class*="fontHeadline"]') ||
-            item.querySelector('div[aria-label]');
-          const name = nameElement ? (nameElement.innerText || nameElement.getAttribute('aria-label') || '').trim() : '';
-
-          if (!name || seenNames.has(name)) return;
-          seenNames.add(name);
-
-          const ratingElement = item.querySelector('[aria-label*="stars"]') ||
-            item.querySelector('[aria-label*="Star"]');
-          const ratingText = ratingElement ? ratingElement.getAttribute('aria-label') : '';
-          const rating = ratingText ? parseFloat(ratingText.match(/(\d+\.?\d*)/)?.[1] || '0') : 0;
-
-          const categoryElement = item.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
-            item.querySelector('[class*="fontBodyMedium"] span');
-          const category = categoryElement ? (categoryElement.innerText || '').trim() : 'N/A';
-
-          const addressElement = item.querySelector('div[class*="fontBodyMedium"]') ||
-            item.querySelector('[aria-label]');
-          const address = addressElement ? (addressElement.innerText || addressElement.getAttribute('aria-label') || '').trim() : '';
-
-          const linkElement = item.querySelector('a.hfpxzc');
-          let detailUrl = linkElement ? linkElement.href : '';
-          if (detailUrl && detailUrl.startsWith('/')) {
-            detailUrl = `https://www.google.com${detailUrl}`;
-          }
-
-          results.push({
-            keyword: keywordLabel,
-            name: name || 'N/A',
-            rating: rating || 'N/A',
-            category: category || 'N/A',
-            address: address || 'N/A',
-            phone: 'N/A',
-            website: 'Tidak',
-            detailUrl: detailUrl || '',
-          });
-        } catch (err) {
-          console.error('Error parsing item:', err.message);
-        }
-      });
-
-      return results;
-    }, session.maxResults, keyword);
+    if (businesses.length === 0) {
+      await this.logExtractionDiagnostics(page, `keyword "${keyword}"`);
+    }
 
     console.log(`✅ Found ${businesses.length} businesses untuk keyword "${keyword}"`);
 
@@ -2468,9 +2457,7 @@ class ScraperService {
           await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
-        const currentItemCount = await page.evaluate(() => {
-          return document.querySelectorAll('div[role="feed"] div[jsaction]').length;
-        });
+        const currentItemCount = await page.evaluate(countResultCardsInBrowser);
         
         const currentHeight = scrollResult.scrollHeight;
         
