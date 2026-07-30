@@ -2,7 +2,7 @@
 nixPkgs = ["chromium", "nodejs"]
 
 [phases.build]
-cmds = ["npm install", "npm run build", "cd backend && npm install"]
+cmds = ["npm install", "npm run build", "cd backend && npm install", "which chromium > /app/chromium-path.txt"]
 
 [start]
-cmd = "cd backend && PUPPETEER_EXECUTABLE_PATH=$(which chromium) node src/server.js"
+cmd = "bash -c 'export PUPPETEER_EXECUTABLE_PATH=$(cat /app/chromium-path.txt); cd /app/backend && node src/server.js'"
