@@ -27,3 +27,9 @@ dist-ssr
 backend/sessions/
 sessions/
 *.session.json
+release/
+node-portable/
+original_scraperService.js
+current_changes.patch
+patch.js
+patch2.cjs
