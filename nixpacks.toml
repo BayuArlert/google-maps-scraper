@@ -1,5 +1,8 @@
 [phases.setup]
 nixPkgs = ["chromium", "nodejs"]
 
+[phases.build]
+cmds = ["npm install", "npm run build", "cd backend && npm install", "cd backend && npx puppeteer browsers install chrome"]
+
 [start]
-cmd = "npm start"
+cmd = "cd backend && node src/server.js"
