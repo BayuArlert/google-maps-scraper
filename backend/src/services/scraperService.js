@@ -137,26 +137,20 @@ class ScraperService {
       const businesses = await page.evaluate((maxResults) => {
         const results = [];
         
-        // Coba beberapa selector yang berbeda untuk memastikan menangkap semua hasil
-        const selectors = [
-          'div[role="feed"] > div > div[jsaction]',
-          'div[role="feed"] > div[jsaction]',
-          'div[role="feed"] div[jsaction].m6QErb'
-        ];
-        
         let items = [];
-        for (const selector of selectors) {
-          const found = document.querySelectorAll(selector);
-          if (found.length > items.length) {
-            items = Array.from(found);
-          }
+        const feed = document.querySelector('div[role="feed"]');
+        if (feed) {
+          // Ambil semua result card - Google Maps recent DOM uses nested divs inside feed
+          const allDivs = feed.querySelectorAll('div[jsaction]');
+          // Filter: hanya ambil div yang punya link detail (hfpxzc class) = result card
+          items = Array.from(allDivs).filter(div => div.querySelector('a.hfpxzc'));
         }
-        
-        // Jika tidak ada hasil dengan selector di atas, coba selector umum
+
         if (items.length === 0) {
-          const feed = document.querySelector('div[role="feed"]');
-          if (feed) {
-            items = Array.from(feed.querySelectorAll('div[jsaction]'));
+          // Fallback: coba selector lain
+          const feed2 = document.querySelector('div[role="feed"]');
+          if (feed2) {
+            items = Array.from(feed2.querySelectorAll('div[role="article"], div.Nv2PK'));
           }
         }
 
@@ -170,8 +164,9 @@ class ScraperService {
             // Nama bisnis
             const nameElement = item.querySelector('div.fontHeadlineSmall') || 
                               item.querySelector('[class*="fontHeadline"]') ||
+                              item.querySelector('a.hfpxzc') ||
                               item.querySelector('div[aria-label]');
-            const name = nameElement ? (nameElement.innerText || nameElement.getAttribute('aria-label') || '').trim() : '';
+            const name = nameElement ? (nameElement.getAttribute('aria-label') || nameElement.innerText || '').trim() : '';
 
             // Skip jika tidak ada nama atau sudah pernah dilihat
             if (!name || seenNames.has(name)) return;
