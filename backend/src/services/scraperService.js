@@ -318,6 +318,179 @@ class ScraperService {
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
     });
+    await this.injectBrowserHelpers(page);
+  }
+
+  async injectBrowserHelpers(page) {
+    await page.evaluateOnNewDocument(() => {
+      window.__mapsScraper = {
+        getFeedListItems() {
+          const feed = document.querySelector('div[role="feed"]');
+          if (!feed) return [];
+
+          const cardSelectors = ['a.hfpxzc', '.Nv2PK', 'div[role="article"]'];
+          let items = [];
+          for (const selector of cardSelectors) {
+            const found = Array.from(feed.querySelectorAll(selector));
+            if (found.length > items.length) items = found;
+          }
+
+          if (items.length === 0) {
+            items = Array.from(feed.querySelectorAll('div[jsaction]')).filter(div => div.querySelector('a.hfpxzc'));
+          }
+
+          if (items.length === 0) {
+            items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
+          }
+
+          return items;
+        },
+
+        getBusinessName(item) {
+          if (!item) return '';
+          const link = item.matches('a.hfpxzc') ? item : item.querySelector('a.hfpxzc');
+          if (link) {
+            const name = (link.getAttribute('aria-label') || link.innerText || link.textContent || '').trim();
+            if (name) return name;
+          }
+          const nameElement = item.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd, div[aria-label]');
+          return nameElement
+            ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
+            : '';
+        },
+
+        extractPhoneFromText(text) {
+          if (!text || !text.trim()) return null;
+          const normalized = text.trim();
+
+          const usPattern = normalized.match(/(?:\+1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/);
+          if (usPattern) return `${usPattern[1]}${usPattern[2]}${usPattern[3]}`;
+
+          const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
+          if (hpPattern08) {
+            const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+            if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+          }
+
+          const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
+          if (hpPattern08Long) return hpPattern08Long[1];
+
+          const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+          if (hpPattern62) {
+            let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+            if (cleaned.startsWith('+62')) cleaned = `0${cleaned.substring(3)}`;
+            else if (cleaned.startsWith('62')) cleaned = `0${cleaned.substring(2)}`;
+            if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+          }
+
+          const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+          if (landlinePattern) {
+            const cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
+            if (cleaned.length >= 9 && cleaned.length <= 12) return cleaned;
+          }
+
+          const genericPattern = normalized.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
+          if (genericPattern) {
+            const cleaned = genericPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+            if (cleaned.length >= 10 && cleaned.length <= 15) return cleaned;
+          }
+
+          const telLink = normalized.match(/tel:(\+?\d+)/i);
+          if (telLink && telLink[1]) {
+            const digits = telLink[1].replace(/\D/g, '');
+            if (digits.length >= 10 && digits.length <= 15) return telLink[1];
+          }
+
+          let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').replace(/[()]/g, '');
+          if (cleaned.startsWith('+1') && cleaned.length >= 12) cleaned = cleaned.substring(2);
+          if (cleaned.startsWith('+62') && cleaned.length >= 12) cleaned = `0${cleaned.substring(3)}`;
+          if (cleaned.length >= 10 && cleaned.length <= 15 && /^\d+$/.test(cleaned)) return cleaned;
+
+          return null;
+        },
+
+        countResultCards() {
+          return this.getFeedListItems().length;
+        },
+
+        extractBusinesses(keywordLabel) {
+          const results = [];
+          const seenNames = new Set();
+          const items = this.getFeedListItems();
+
+          items.forEach((item) => {
+            try {
+              const card = item.matches('a.hfpxzc')
+                ? (item.closest('.Nv2PK') || item.parentElement || item)
+                : item;
+              const linkElement = card.querySelector('a.hfpxzc') || (item.matches('a.hfpxzc') ? item : null);
+
+              let name = '';
+              if (linkElement) {
+                name = (linkElement.getAttribute('aria-label') || linkElement.innerText || linkElement.textContent || '').trim();
+              }
+              if (!name) name = this.getBusinessName(card);
+
+              if (!name || seenNames.has(name)) return;
+              seenNames.add(name);
+
+              const ratingElement = card.querySelector('span[role="img"]') ||
+                card.querySelector('[aria-label*="stars"]') ||
+                card.querySelector('[aria-label*="Star"]');
+              let rating = '';
+              if (ratingElement) {
+                const ratingText = ratingElement.getAttribute('aria-label') || '';
+                const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
+                rating = ratingMatch ? ratingMatch[1] : '';
+              }
+
+              const categoryElement = card.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
+                card.querySelector('[class*="fontBodyMedium"] span');
+              const category = categoryElement ? (categoryElement.innerText || categoryElement.textContent || '').trim() : '';
+
+              const addressElements = card.querySelectorAll('div.fontBodyMedium > div > div');
+              let address = '';
+              addressElements.forEach(el => {
+                const text = (el.innerText || el.textContent || '').trim();
+                if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m|mi|ft)$/) && text !== category && text !== name) {
+                  address = text;
+                }
+              });
+
+              if (!address) {
+                const addressText = card.querySelector('[class*="fontBodyMedium"]');
+                if (addressText) {
+                  const text = (addressText.innerText || addressText.textContent || '').trim();
+                  if (text && !text.includes('★') && text !== category && text !== name) address = text;
+                }
+              }
+
+              let detailUrl = linkElement ? linkElement.href : '';
+              if (detailUrl && detailUrl.startsWith('/')) {
+                detailUrl = `https://www.google.com${detailUrl}`;
+              }
+
+              const business = {
+                name,
+                rating: rating || 'N/A',
+                category: category || 'N/A',
+                address: address || 'N/A',
+                phone: 'N/A',
+                website: 'Tidak',
+                detailUrl: detailUrl || '',
+              };
+
+              if (keywordLabel) business.keyword = keywordLabel;
+              results.push(business);
+            } catch (err) {
+              console.error('Error parsing item:', err.message);
+            }
+          });
+
+          return results;
+        },
+      };
+    });
   }
 
   async dismissGoogleConsent(page) {
@@ -450,7 +623,7 @@ class ScraperService {
       await this.scrollResults(page, maxResults);
 
       // Extract data
-      const businesses = await page.evaluate(extractBusinessesInBrowser, null);
+      const businesses = await page.evaluate((keyword) => window.__mapsScraper.extractBusinesses(keyword), null);
 
       if (businesses.length === 0) {
         await this.logExtractionDiagnostics(page, `keyword "${searchQuery}"`);
@@ -559,7 +732,7 @@ class ScraperService {
         }
         
         // Cek jumlah item yang sudah ter-load
-        const currentItemCount = await page.evaluate(countResultCardsInBrowser);
+        const currentItemCount = await page.evaluate(() => window.__mapsScraper.countResultCards());
         
         const currentHeight = scrollResult.scrollHeight;
         
@@ -946,7 +1119,7 @@ class ScraperService {
     try {
       // Scroll ke elemen terlebih dahulu untuk memastikan terlihat
       await page.evaluate((idx) => {
-        const items = getFeedListItemsInBrowser();
+        const items = window.__mapsScraper.getFeedListItems();
         if (items[idx]) {
           items[idx].scrollIntoView({ behavior: 'auto', block: 'center' });
         }
@@ -955,8 +1128,8 @@ class ScraperService {
       await new Promise(resolve => setTimeout(resolve, 1000));
       
       // Cari elemen bisnis di list view berdasarkan index/nama dan klik elemen yang benar (card/anchor)
-      const clicked = await page.evaluate((name, idx, getItems, getName) => {
-        const items = getItems();
+      const clicked = await page.evaluate((name, idx) => {
+        const items = window.__mapsScraper.getFeedListItems();
 
         const clickElement = (el) => {
           if (!el) return false;
@@ -976,14 +1149,14 @@ class ScraperService {
 
         const normalizedName = (name || '').trim().toLowerCase();
         for (const el of items) {
-          const itemName = getName(el);
+          const itemName = window.__mapsScraper.getBusinessName(el);
           if (itemName && itemName.trim().toLowerCase() === normalizedName) {
             return clickElement(el);
           }
         }
 
         return false;
-      }, businessName, index, getFeedListItemsInBrowser, getBusinessNameFromListItem);
+      }, businessName, index);
       
       if (!clicked) {
         console.log(`⚠️ Could not find business element: ${businessName}`);
@@ -1043,14 +1216,14 @@ class ScraperService {
         
         // Jika belum terbuka, coba klik lagi
         if (attempt < 9) {
-          await page.evaluate((idx, getItems) => {
-            const items = getItems();
+          await page.evaluate((idx) => {
+            const items = window.__mapsScraper.getFeedListItems();
             if (items[idx]) {
               const el = items[idx];
               const anchor = el.matches('a.hfpxzc') ? el : el.querySelector('a.hfpxzc');
               (anchor || el).click();
             }
-          }, index, getFeedListItemsInBrowser);
+          }, index);
         }
       }
       
@@ -1171,7 +1344,8 @@ class ScraperService {
 
         // Lakukan scroll bertahap pada panel detail sambil mencari nomor
         for (let s = 0; s < 12; s++) {
-          const found = await page.evaluate((extractPhone) => {
+          const found = await page.evaluate(() => {
+            const extractPhone = window.__mapsScraper.extractPhoneFromText.bind(window.__mapsScraper);
             const findPhone = () => {
               const phoneButton = document.querySelector('button.CsEnBe[data-item-id^="phone:tel:"]');
               if (phoneButton) {
@@ -2420,7 +2594,7 @@ class ScraperService {
           await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
-        const currentItemCount = await page.evaluate(countResultCardsInBrowser);
+        const currentItemCount = await page.evaluate(() => window.__mapsScraper.countResultCards());
         
         const currentHeight = scrollResult.scrollHeight;
         
