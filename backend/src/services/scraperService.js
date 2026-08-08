@@ -9,6 +9,22 @@ function findChrome() {
   const envPath = process.env.CHROME_EXECUTABLE_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
   if (envPath) return envPath;
 
+  // Common paths for Nix/Railway/Linux environments
+  const knownPaths = [
+    '/run/current-system/sw/bin/chromium',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/snap/bin/chromium',
+    '/nix/var/nix/profiles/default/bin/chromium',
+  ];
+
+  const { existsSync } = require('fs');
+  for (const p of knownPaths) {
+    if (existsSync(p)) return p;
+  }
+
   const isWindows = process.platform === 'win32';
   const command = isWindows
     ? 'where chromium 2>nul || where chrome 2>nul || where google-chrome 2>nul'
@@ -23,221 +39,179 @@ function findChrome() {
 }
 
 const CHROME_PATH = findChrome();
+console.log(`[ScraperService] Chrome path resolved: ${CHROME_PATH || 'NOT FOUND - will use puppeteer default'}`);
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-function countResultCardsInBrowser() {
-  return getFeedListItemsInBrowser().length;
-}
 
-function getFeedListItemsInBrowser() {
-  const feed = document.querySelector('div[role="feed"]');
-  if (!feed) return [];
+function installMapsScraperHelpers() {
+  window.__mapsScraper = {
+    getFeedListItems() {
+      const feed = document.querySelector('div[role="feed"]');
+      if (!feed) return [];
 
-  const cardSelectors = ['a.hfpxzc', '.Nv2PK', 'div[role="article"]'];
-  let items = [];
-  for (const selector of cardSelectors) {
-    const found = Array.from(feed.querySelectorAll(selector));
-    if (found.length > items.length) {
-      items = found;
-    }
-  }
-
-  if (items.length === 0) {
-    items = Array.from(feed.querySelectorAll('div[jsaction]')).filter(div => div.querySelector('a.hfpxzc'));
-  }
-
-  if (items.length === 0) {
-    items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
-  }
-
-  return items;
-}
-
-function getBusinessNameFromListItem(item) {
-  if (!item) return '';
-
-  const link = item.matches('a.hfpxzc') ? item : item.querySelector('a.hfpxzc');
-  if (link) {
-    const name = (link.getAttribute('aria-label') || link.innerText || link.textContent || '').trim();
-    if (name) return name;
-  }
-
-  const nameElement = item.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd, div[aria-label]');
-  return nameElement
-    ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
-    : '';
-}
-
-function extractPhoneFromTextInBrowser(text) {
-  if (!text || !text.trim()) return null;
-
-  const normalized = text.trim();
-
-  const usPattern = normalized.match(/(?:\+1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/);
-  if (usPattern) {
-    return `${usPattern[1]}${usPattern[2]}${usPattern[3]}`;
-  }
-
-  const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
-  if (hpPattern08) {
-    const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-    if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
-  }
-
-  const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
-  if (hpPattern08Long) return hpPattern08Long[1];
-
-  const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-  if (hpPattern62) {
-    let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-    if (cleaned.startsWith('+62')) cleaned = `0${cleaned.substring(3)}`;
-    else if (cleaned.startsWith('62')) cleaned = `0${cleaned.substring(2)}`;
-    if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
-  }
-
-  const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-  if (landlinePattern) {
-    const cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
-    if (cleaned.length >= 9 && cleaned.length <= 12) return cleaned;
-  }
-
-  const genericPattern = normalized.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
-  if (genericPattern) {
-    const cleaned = genericPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-    if (cleaned.length >= 10 && cleaned.length <= 15) return cleaned;
-  }
-
-  const telLink = normalized.match(/tel:(\+?\d+)/i);
-  if (telLink && telLink[1]) {
-    const digits = telLink[1].replace(/\D/g, '');
-    if (digits.length >= 10 && digits.length <= 15) return telLink[1];
-  }
-
-  let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').replace(/[()]/g, '');
-  if (cleaned.startsWith('+1') && cleaned.length >= 12) cleaned = cleaned.substring(2);
-  if (cleaned.startsWith('+62') && cleaned.length >= 12) cleaned = `0${cleaned.substring(3)}`;
-  if (cleaned.length >= 10 && cleaned.length <= 15 && /^\d+$/.test(cleaned)) return cleaned;
-
-  return null;
-}
-
-function extractBusinessesInBrowser(keywordLabel) {
-  const results = [];
-  const seenNames = new Set();
-  const feed = document.querySelector('div[role="feed"]');
-
-  if (!feed) {
-    return results;
-  }
-
-  let items = [];
-  const cardSelectors = [
-    'a.hfpxzc',
-    '.Nv2PK',
-    'div[role="article"]',
-  ];
-
-  for (const selector of cardSelectors) {
-    const found = Array.from(feed.querySelectorAll(selector));
-    if (found.length > items.length) {
-      items = found;
-    }
-  }
-
-  if (items.length === 0) {
-    const allDivs = feed.querySelectorAll('div[jsaction]');
-    items = Array.from(allDivs).filter(div => div.querySelector('a.hfpxzc'));
-  }
-
-  if (items.length === 0) {
-    items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
-  }
-
-  items.forEach((item) => {
-    try {
-      const card = item.matches('a.hfpxzc')
-        ? (item.closest('.Nv2PK') || item.parentElement || item)
-        : item;
-      const linkElement = card.querySelector('a.hfpxzc') || (item.matches('a.hfpxzc') ? item : null);
-
-      let name = '';
-      if (linkElement) {
-        name = (linkElement.getAttribute('aria-label') || linkElement.innerText || linkElement.textContent || '').trim();
+      const cardSelectors = ['a.hfpxzc', '.Nv2PK', 'div[role="article"]'];
+      let items = [];
+      for (const selector of cardSelectors) {
+        const found = Array.from(feed.querySelectorAll(selector));
+        if (found.length > items.length) items = found;
       }
 
-      if (!name) {
-        const nameElement = card.querySelector('div.fontHeadlineSmall') ||
-          card.querySelector('[class*="fontHeadline"]') ||
-          card.querySelector('.qBF1Pd') ||
-          card.querySelector('div[aria-label]');
-        name = nameElement
-          ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
-          : '';
+      if (items.length === 0) {
+        items = Array.from(feed.querySelectorAll('div[jsaction]')).filter(div => div.querySelector('a.hfpxzc'));
       }
 
-      if (!name || seenNames.has(name)) return;
-      seenNames.add(name);
-
-      const ratingElement = card.querySelector('span[role="img"]') ||
-        card.querySelector('[aria-label*="stars"]') ||
-        card.querySelector('[aria-label*="Star"]');
-      let rating = '';
-      if (ratingElement) {
-        const ratingText = ratingElement.getAttribute('aria-label') || '';
-        const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
-        rating = ratingMatch ? ratingMatch[1] : '';
+      if (items.length === 0) {
+        items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
       }
 
-      const categoryElement = card.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
-        card.querySelector('[class*="fontBodyMedium"] span');
-      const category = categoryElement ? (categoryElement.innerText || categoryElement.textContent || '').trim() : '';
+      return items;
+    },
 
-      const addressElements = card.querySelectorAll('div.fontBodyMedium > div > div');
-      let address = '';
-      addressElements.forEach(el => {
-        const text = (el.innerText || el.textContent || '').trim();
-        if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m|mi|ft)$/) && text !== category && text !== name) {
-          address = text;
+    getBusinessName(item) {
+      if (!item) return '';
+      const link = item.matches('a.hfpxzc') ? item : item.querySelector('a.hfpxzc');
+      if (link) {
+        const name = (link.getAttribute('aria-label') || link.innerText || link.textContent || '').trim();
+        if (name) return name;
+      }
+      const nameElement = item.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd, div[aria-label]');
+      return nameElement
+        ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
+        : '';
+    },
+
+    extractPhoneFromText(text) {
+      if (!text || !text.trim()) return null;
+      const normalized = text.trim();
+
+      const usPattern = normalized.match(/(?:\+1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/);
+      if (usPattern) return `${usPattern[1]}${usPattern[2]}${usPattern[3]}`;
+
+      const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
+      if (hpPattern08) {
+        const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+        if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+      }
+
+      const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
+      if (hpPattern08Long) return hpPattern08Long[1];
+
+      const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+      if (hpPattern62) {
+        let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+        if (cleaned.startsWith('+62')) cleaned = `0${cleaned.substring(3)}`;
+        else if (cleaned.startsWith('62')) cleaned = `0${cleaned.substring(2)}`;
+        if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
+      }
+
+      const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
+      if (landlinePattern) {
+        const cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
+        if (cleaned.length >= 9 && cleaned.length <= 12) return cleaned;
+      }
+
+      const genericPattern = normalized.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
+      if (genericPattern) {
+        const cleaned = genericPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
+        if (cleaned.length >= 10 && cleaned.length <= 15) return cleaned;
+      }
+
+      const telLink = normalized.match(/tel:(\+?\d+)/i);
+      if (telLink && telLink[1]) {
+        const digits = telLink[1].replace(/\D/g, '');
+        if (digits.length >= 10 && digits.length <= 15) return telLink[1];
+      }
+
+      let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').replace(/[()]/g, '');
+      if (cleaned.startsWith('+1') && cleaned.length >= 12) cleaned = cleaned.substring(2);
+      if (cleaned.startsWith('+62') && cleaned.length >= 12) cleaned = `0${cleaned.substring(3)}`;
+      if (cleaned.length >= 10 && cleaned.length <= 15 && /^\d+$/.test(cleaned)) return cleaned;
+
+      return null;
+    },
+
+    countResultCards() {
+      return this.getFeedListItems().length;
+    },
+
+    extractBusinesses(keywordLabel) {
+      const results = [];
+      const seenNames = new Set();
+      const items = this.getFeedListItems();
+
+      items.forEach((item) => {
+        try {
+          const card = item.matches('a.hfpxzc')
+            ? (item.closest('.Nv2PK') || item.parentElement || item)
+            : item;
+          const linkElement = card.querySelector('a.hfpxzc') || (item.matches('a.hfpxzc') ? item : null);
+
+          let name = '';
+          if (linkElement) {
+            name = (linkElement.getAttribute('aria-label') || linkElement.innerText || linkElement.textContent || '').trim();
+          }
+          if (!name) name = this.getBusinessName(card);
+
+          if (!name || seenNames.has(name)) return;
+          seenNames.add(name);
+
+          const ratingElement = card.querySelector('span[role="img"]') ||
+            card.querySelector('[aria-label*="stars"]') ||
+            card.querySelector('[aria-label*="Star"]');
+          let rating = '';
+          if (ratingElement) {
+            const ratingText = ratingElement.getAttribute('aria-label') || '';
+            const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
+            rating = ratingMatch ? ratingMatch[1] : '';
+          }
+
+          const categoryElement = card.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
+            card.querySelector('[class*="fontBodyMedium"] span');
+          const category = categoryElement ? (categoryElement.innerText || categoryElement.textContent || '').trim() : '';
+
+          const addressElements = card.querySelectorAll('div.fontBodyMedium > div > div');
+          let address = '';
+          addressElements.forEach(el => {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m|mi|ft)$/) && text !== category && text !== name) {
+              address = text;
+            }
+          });
+
+          if (!address) {
+            const addressText = card.querySelector('[class*="fontBodyMedium"]');
+            if (addressText) {
+              const text = (addressText.innerText || addressText.textContent || '').trim();
+              if (text && !text.includes('★') && text !== category && text !== name) address = text;
+            }
+          }
+
+          let detailUrl = linkElement ? linkElement.href : '';
+          if (detailUrl && detailUrl.startsWith('/')) {
+            detailUrl = `https://www.google.com${detailUrl}`;
+          }
+
+          const business = {
+            name,
+            rating: rating || 'N/A',
+            category: category || 'N/A',
+            address: address || 'N/A',
+            phone: 'N/A',
+            website: 'Tidak',
+            detailUrl: detailUrl || '',
+          };
+
+          if (keywordLabel) business.keyword = keywordLabel;
+          results.push(business);
+        } catch (err) {
+          console.error('Error parsing item:', err.message);
         }
       });
 
-      if (!address) {
-        const addressText = card.querySelector('[class*="fontBodyMedium"]');
-        if (addressText) {
-          const text = (addressText.innerText || addressText.textContent || '').trim();
-          if (text && !text.includes('★') && text !== category && text !== name) {
-            address = text;
-          }
-        }
-      }
-
-      let detailUrl = linkElement ? linkElement.href : '';
-      if (detailUrl && detailUrl.startsWith('/')) {
-        detailUrl = `https://www.google.com${detailUrl}`;
-      }
-
-      const business = {
-        name,
-        rating: rating || 'N/A',
-        category: category || 'N/A',
-        address: address || 'N/A',
-        phone: 'N/A',
-        website: 'Tidak',
-        detailUrl: detailUrl || '',
-      };
-
-      if (keywordLabel) {
-        business.keyword = keywordLabel;
-      }
-
-      results.push(business);
-    } catch (err) {
-      console.error('Error parsing item:', err.message);
-    }
-  });
-
-  return results;
+      return results;
+    },
+  };
 }
 
 class ScraperService {
@@ -269,12 +243,29 @@ class ScraperService {
 
   buildLaunchOptions(options = {}) {
     const headless = this.resolveHeadlessMode(options);
+    const isLinux = process.platform === 'linux';
 
     const defaultArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--window-size=1920x1080'
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-ipc-flooding-protection',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-first-run',
+      '--no-zygote',
+      '--safebrowsing-disable-auto-update',
+      '--window-size=1920,1080',
+      // Only add shared memory workaround on Linux (Railway/container)
+      ...(isLinux ? ['--shm-size=256mb'] : [])
     ];
 
     const args = Array.isArray(options.args)
@@ -322,175 +313,17 @@ class ScraperService {
   }
 
   async injectBrowserHelpers(page) {
-    await page.evaluateOnNewDocument(() => {
-      window.__mapsScraper = {
-        getFeedListItems() {
-          const feed = document.querySelector('div[role="feed"]');
-          if (!feed) return [];
+    await page.evaluateOnNewDocument(installMapsScraperHelpers);
+  }
 
-          const cardSelectors = ['a.hfpxzc', '.Nv2PK', 'div[role="article"]'];
-          let items = [];
-          for (const selector of cardSelectors) {
-            const found = Array.from(feed.querySelectorAll(selector));
-            if (found.length > items.length) items = found;
-          }
+  async ensureBrowserHelpers(page) {
+    const hasHelpers = await page.evaluate(() => (
+      typeof window.__mapsScraper?.getFeedListItems === 'function'
+    ));
 
-          if (items.length === 0) {
-            items = Array.from(feed.querySelectorAll('div[jsaction]')).filter(div => div.querySelector('a.hfpxzc'));
-          }
-
-          if (items.length === 0) {
-            items = Array.from(feed.querySelectorAll('div[role="article"], div.Nv2PK, div[jsaction]'));
-          }
-
-          return items;
-        },
-
-        getBusinessName(item) {
-          if (!item) return '';
-          const link = item.matches('a.hfpxzc') ? item : item.querySelector('a.hfpxzc');
-          if (link) {
-            const name = (link.getAttribute('aria-label') || link.innerText || link.textContent || '').trim();
-            if (name) return name;
-          }
-          const nameElement = item.querySelector('div.fontHeadlineSmall, [class*="fontHeadline"], .qBF1Pd, div[aria-label]');
-          return nameElement
-            ? (nameElement.getAttribute('aria-label') || nameElement.innerText || nameElement.textContent || '').trim()
-            : '';
-        },
-
-        extractPhoneFromText(text) {
-          if (!text || !text.trim()) return null;
-          const normalized = text.trim();
-
-          const usPattern = normalized.match(/(?:\+1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/);
-          if (usPattern) return `${usPattern[1]}${usPattern[2]}${usPattern[3]}`;
-
-          const hpPattern08 = normalized.match(/\b(08\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})\b/);
-          if (hpPattern08) {
-            const cleaned = hpPattern08[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
-          }
-
-          const hpPattern08Long = normalized.match(/\b(08\d{8,10})\b/);
-          if (hpPattern08Long) return hpPattern08Long[1];
-
-          const hpPattern62 = normalized.match(/(\+?62[\s-]?8\d{1,2}[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-          if (hpPattern62) {
-            let cleaned = hpPattern62[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.startsWith('+62')) cleaned = `0${cleaned.substring(3)}`;
-            else if (cleaned.startsWith('62')) cleaned = `0${cleaned.substring(2)}`;
-            if (cleaned.length >= 10 && cleaned.length <= 13) return cleaned;
-          }
-
-          const landlinePattern = normalized.match(/(\(?0[2-7]\d{1,2}\)?[\s-]?\d{3,4}[\s-]?\d{3,4})/);
-          if (landlinePattern) {
-            const cleaned = landlinePattern[1].replace(/[()]/g, '').replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.length >= 9 && cleaned.length <= 12) return cleaned;
-          }
-
-          const genericPattern = normalized.match(/(\d{3,4}[\s-]?\d{3,4}[\s-]?\d{3,6})/);
-          if (genericPattern) {
-            const cleaned = genericPattern[1].replace(/\s+/g, '').replace(/-/g, '').trim();
-            if (cleaned.length >= 10 && cleaned.length <= 15) return cleaned;
-          }
-
-          const telLink = normalized.match(/tel:(\+?\d+)/i);
-          if (telLink && telLink[1]) {
-            const digits = telLink[1].replace(/\D/g, '');
-            if (digits.length >= 10 && digits.length <= 15) return telLink[1];
-          }
-
-          let cleaned = normalized.replace(/\s+/g, '').replace(/-/g, '').replace(/[^\d+()-]/g, '').replace(/[()]/g, '');
-          if (cleaned.startsWith('+1') && cleaned.length >= 12) cleaned = cleaned.substring(2);
-          if (cleaned.startsWith('+62') && cleaned.length >= 12) cleaned = `0${cleaned.substring(3)}`;
-          if (cleaned.length >= 10 && cleaned.length <= 15 && /^\d+$/.test(cleaned)) return cleaned;
-
-          return null;
-        },
-
-        countResultCards() {
-          return this.getFeedListItems().length;
-        },
-
-        extractBusinesses(keywordLabel) {
-          const results = [];
-          const seenNames = new Set();
-          const items = this.getFeedListItems();
-
-          items.forEach((item) => {
-            try {
-              const card = item.matches('a.hfpxzc')
-                ? (item.closest('.Nv2PK') || item.parentElement || item)
-                : item;
-              const linkElement = card.querySelector('a.hfpxzc') || (item.matches('a.hfpxzc') ? item : null);
-
-              let name = '';
-              if (linkElement) {
-                name = (linkElement.getAttribute('aria-label') || linkElement.innerText || linkElement.textContent || '').trim();
-              }
-              if (!name) name = this.getBusinessName(card);
-
-              if (!name || seenNames.has(name)) return;
-              seenNames.add(name);
-
-              const ratingElement = card.querySelector('span[role="img"]') ||
-                card.querySelector('[aria-label*="stars"]') ||
-                card.querySelector('[aria-label*="Star"]');
-              let rating = '';
-              if (ratingElement) {
-                const ratingText = ratingElement.getAttribute('aria-label') || '';
-                const ratingMatch = ratingText.match(/(\d+\.?\d*)/);
-                rating = ratingMatch ? ratingMatch[1] : '';
-              }
-
-              const categoryElement = card.querySelector('div.fontBodyMedium > div > div:nth-child(2) span') ||
-                card.querySelector('[class*="fontBodyMedium"] span');
-              const category = categoryElement ? (categoryElement.innerText || categoryElement.textContent || '').trim() : '';
-
-              const addressElements = card.querySelectorAll('div.fontBodyMedium > div > div');
-              let address = '';
-              addressElements.forEach(el => {
-                const text = (el.innerText || el.textContent || '').trim();
-                if (text && !text.includes('★') && !text.match(/^\d+\s*(km|m|mi|ft)$/) && text !== category && text !== name) {
-                  address = text;
-                }
-              });
-
-              if (!address) {
-                const addressText = card.querySelector('[class*="fontBodyMedium"]');
-                if (addressText) {
-                  const text = (addressText.innerText || addressText.textContent || '').trim();
-                  if (text && !text.includes('★') && text !== category && text !== name) address = text;
-                }
-              }
-
-              let detailUrl = linkElement ? linkElement.href : '';
-              if (detailUrl && detailUrl.startsWith('/')) {
-                detailUrl = `https://www.google.com${detailUrl}`;
-              }
-
-              const business = {
-                name,
-                rating: rating || 'N/A',
-                category: category || 'N/A',
-                address: address || 'N/A',
-                phone: 'N/A',
-                website: 'Tidak',
-                detailUrl: detailUrl || '',
-              };
-
-              if (keywordLabel) business.keyword = keywordLabel;
-              results.push(business);
-            } catch (err) {
-              console.error('Error parsing item:', err.message);
-            }
-          });
-
-          return results;
-        },
-      };
-    });
+    if (!hasHelpers) {
+      await page.evaluate(installMapsScraperHelpers);
+    }
   }
 
   async dismissGoogleConsent(page) {
@@ -588,6 +421,7 @@ class ScraperService {
     }
 
     await new Promise(resolve => setTimeout(resolve, 1500));
+    await this.ensureBrowserHelpers(page);
   }
 
   async scrapeGoogleMaps(keyword, location = '', maxResults = 0, options = {}) {
@@ -682,6 +516,7 @@ class ScraperService {
     const scrollableSelector = 'div[role="feed"]';
     
     try {
+      await this.ensureBrowserHelpers(page);
       let previousHeight = 0;
       let previousItemCount = 0;
       let noChangeCount = 0;
@@ -1117,6 +952,7 @@ class ScraperService {
 
   async getPhoneNumberFromList(page, businessName, index) {
     try {
+      await this.ensureBrowserHelpers(page);
       // Scroll ke elemen terlebih dahulu untuk memastikan terlihat
       await page.evaluate((idx) => {
         const items = window.__mapsScraper.getFeedListItems();
@@ -1396,7 +1232,7 @@ class ScraperService {
               return { found: false, scrolled: panel.scrollTop !== before };
             }
             return { found: false, scrolled: false };
-          }, extractPhoneFromTextInBrowser);
+          });
           if (found && found.found) return found.result;
           await new Promise(r => setTimeout(r, 600));
         }
@@ -1412,9 +1248,9 @@ class ScraperService {
 
       // Jika belum ketemu, lanjutkan dengan strategi evaluate komprehensif
       // Verifikasi detail panel dan ambil hanya di dalam panel detail yang benar
-      const phoneResult = await page.evaluate((expectedBusinessName, extractPhone) => {
+      const phoneResult = await page.evaluate((expectedBusinessName) => {
         const debugLog = [];
-        const extractPhoneFromText = extractPhone;
+        const extractPhoneFromText = window.__mapsScraper.extractPhoneFromText.bind(window.__mapsScraper);
         
         // Cari detail panel yang benar (bukan hasil pencarian)
         // Detail panel biasanya memiliki struktur spesifik
@@ -1864,7 +1700,7 @@ class ScraperService {
         }
         
         return { phone: null, debugLog: debugLog };
-      }, businessName, extractPhoneFromTextInBrowser);
+      }, businessName);
       
       // Extract phone dari result dan log debugging
       let phone = null;
@@ -2390,7 +2226,7 @@ class ScraperService {
 
     await this.scrollResultsWithSession(page, session.maxResults, sessionId);
 
-    const businesses = await page.evaluate(extractBusinessesInBrowser, keyword);
+    const businesses = await page.evaluate((keyword) => window.__mapsScraper.extractBusinesses(keyword), keyword);
 
     if (businesses.length === 0) {
       await this.logExtractionDiagnostics(page, `keyword "${keyword}"`);
@@ -2542,6 +2378,7 @@ class ScraperService {
     const scrollableSelector = 'div[role="feed"]';
     
     try {
+      await this.ensureBrowserHelpers(page);
       let previousHeight = 0;
       let previousItemCount = 0;
       let noChangeCount = 0;

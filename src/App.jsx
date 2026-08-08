@@ -58,7 +58,7 @@ export default function GoogleMapsScraper() {
 
   const checkBackendStatus = async () => {
     try {
-      const response = await fetch('/health');
+      const response = await fetch('/api/health');
       if (response.ok) {
         setBackendStatus('online');
       } else {

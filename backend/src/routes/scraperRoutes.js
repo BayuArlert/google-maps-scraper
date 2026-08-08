@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const scraperController = require('../controllers/scraperController');
 
+// Health check endpoint
+router.get('/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Server is running' });
+});
+
 // Regular scraping endpoints
 router.post('/scrape', scraperController.scrapeSingle);
 router.post('/scrape-multiple', scraperController.scrapeMultiple);
